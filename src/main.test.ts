@@ -8,7 +8,7 @@ import JsZip from 'jszip';
 import { Soil } from './soil/soil.ts';
 import { entry } from '@gershy/entry';
 
-const codec = { type: 'rec', props: {
+const codec = { type: 'rec', loose: true, props: {
   reg:    { type: 'str', map: (str: string) => new RegExp(str) },
   effort: { type: 'enum', opts: [ 0, 1, 2, 3, 4, 5, 6 ] }
 }} as const;
@@ -186,7 +186,7 @@ entry({ name: 'lilac', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, {
           const zip = await jsZip.generateAsync({ type: 'nodebuffer', compression: 'deflate'[upper]() });
           const lambdaBundle = new PetalTerraform.File('literal/testLambda.js.zip', zip);
           const lambdaRole = new PetalTerraform.Resource('awsIamRole', 'testLambdaRole', {
-            name: `${this.garden.pfx}-test-lambda-role`,
+            name: `${this.garden.pfx}-lambda-assume`,
             assumeRolePolicy: JSON.stringify({
               Version: '2012-10-17',
               Statement: [{
@@ -199,7 +199,7 @@ entry({ name: 'lilac', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, {
           const lambda = new PetalTerraform.Resource('awsLambdaFunction', 'testLambda', {
             functionName: `${this.garden.pfx}-test-lambda`,
             role: lambdaRole.ref('arn'),
-            runtime: 'nodejs22.x',
+            runtime: 'nodejs24.x',
             handler: 'lambda/code.handler',
             filename: lambdaBundle.refStr(),
             sourceCodeHash: await hash(code)
@@ -260,7 +260,7 @@ entry({ name: 'lilac', codec, inp: { reg: '^', effort: 0 }, fn: async (logger, {
         debug:     false,
         pfx:       'lilactest',
         seedBank: { TestInfra },
-        survey: (ctx, seedBank, add) => add(new seedBank.TestInfra({ name: 'testyman' }))
+        survey: (seedBank, add) => add(new seedBank.TestInfra({ name: 'testyman' }))
       });
       
       const soil = new Soil.LocalStack({ logger, garden });

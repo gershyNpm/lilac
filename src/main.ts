@@ -13,6 +13,7 @@ import { Soil } from './soil/soil.ts';
 import proc, { type ProcOpts } from '@gershy/nodejs-proc';
 import Logger from '@gershy/logger';
 import retry from '@gershy/util-retry';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 const { inCls, isCls, getClsName, skip } = cl;
 
@@ -28,7 +29,6 @@ const fire:     typeof cl.fire     = cl.fire;
 const mapk:     typeof cl.mapk     = cl.mapk;
 const merge:    typeof cl.merge    = cl.merge;
 const empty:    typeof cl.empty    = cl.empty;
-const slice:    typeof cl.slice    = cl.slice;
 const upper:    typeof cl.upper    = cl.upper;
 const baseline: typeof cl.baseline = cl.baseline;
 
@@ -52,7 +52,10 @@ export namespace ServiceMap {
   export type AwsFargateClusterName = string;
   export type AwsFargateFamilyName = string;
   export type AwsFargateMap = {
-    [K in `awsFargate/${AwsRegionTerm}/${AwsFargateClusterName}/${AwsFargateFamilyName}`]: { /* nothing! */ }
+    [K in `awsFargate/${AwsRegionTerm}/${AwsFargateClusterName}/${AwsFargateFamilyName}`]: {
+      subnetIds: string[],
+      securityGroupId: string
+    }
   };
   
   export type AwsS3Bucket = string;
@@ -64,7 +67,12 @@ export namespace ServiceMap {
   export type AwsDynamoDbMap = {
     [K in `awsDynamoDb/${AwsRegionTerm}/${AwsDynamoDbTable}`]: { /* nothing! */ }
   };
-
+  
+  export type AwsLambdaName = string;
+  export type AwsLambdaMap = {
+    [K in `awsLambda/${AwsRegionTerm}/${AwsLambdaName}`]: { /* nothing! */ }
+  };
+  
   export type AwsApiGatewayName = string;
   export type AwsApiGatewayMap = {
     [K in `awsApiGateway/${AwsRegionTerm}/${'http' | 'sokt'}/${AwsApiGatewayName}`]: {
@@ -73,7 +81,7 @@ export namespace ServiceMap {
       http?: { path?: string[] }, // Includes apigw stage name, resolved post-tf-apply
     }
   };
-
+  
   export type AwsCloudfrontDistributionName = string;
   export type AwsCloudfrontDistributionMap = {
     [K in `awsCloudfrontDistribution/${'http' | 'sokt'}/${AwsCloudfrontDistributionName}`]: {
@@ -89,9 +97,9 @@ export namespace ServiceMap {
     & AwsFargateMap
     & AwsS3BucketMap
     & AwsDynamoDbMap
+    & AwsLambdaMap
     & AwsApiGatewayMap
     & AwsCloudfrontDistributionMap;
-  
   
   export type Key = keyof Full;
   
@@ -141,7 +149,7 @@ export abstract class Flower {
     // before any petals have been generated. This step allows Flowers to act on the global state
     // of all Flowers. At also solves referential issues like the following...
     //    | const fn = () => v;
-    //    | console.log(fn());
+    //    | fn();
     //    | const v = 'abc';
     // ... where typescript thinks `v` is available, but at runtime it fails as uninitialized.
     // Within `cultivate`, references to other Flowers in the Garden are guaranteed to resolve!
@@ -149,6 +157,7 @@ export abstract class Flower {
   }
   
 };
+
 export type FlowerCtor = (new (args: any) => Flower) & {
   getAwsServices: () => Iterable<Soil.LocalStackAwsService>
 };
@@ -165,13 +174,13 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
   public readonly authenticity: 'real' | 'fake';
   
   protected seedBank:     SB;
-  protected survey:     (garden: Garden<SB, Orn>, flowers: SB, add: <F extends Flower>(flower: F) => F) => Orn
+  protected survey:     (flowers: SB, add: <F extends Flower>(flower: F) => F, garden: Garden<any, any>) => Orn
   protected tfProcArgs: { timeoutMs: number, env: Obj<string> };
   
   public readonly progressiveServiceMap: ServiceMap.Full; // The "progressive" service map is populated gradually - i.e. only after a Garden has been grown (at which point, e.g., an apigw name has resolved to an actual execute-api)
   public readonly serviceMap: ServiceMap.Full; // Synonym
   
-  constructor(args: {
+  constructor(inp: {
     
     pfx:           string,
     term?:         string,
@@ -184,22 +193,26 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
     defaults?:     Obj<any>,
     
     seedBank:      SB,
-    survey:        (garden: Garden<any, any>, flowers: SB, add: <F extends Flower>(flower: F) => F) => Orn
+    survey:        (flowers: SB, add: <F extends Flower>(flower: F) => F, garden: Garden<any, any>) => Orn
     
   }) {
     
-    this.pfx = args.pfx;
-    this.term = args.term ?? args.pfx;
-    this.logger = args.logger;
-    this.infraFact = args.infraFact;
-    this.patioFact = args.patioFact;
-    this.shedFact = args.shedFact;
-    this.debug = args.debug ?? false;
-    this.authenticity = args.authenticity ?? 'real';
-    this.defaults = { region: 'ca-central-1' }[merge](args.defaults ?? {});
+    // Prefix charset is the most standard one possible - we want it to appear without any
+    // transformation in the unique-identifier-field of any cloud resource!
+    Error[cl.assert](inp.pfx, inp => /^[a-z]+$/.test(inp));
     
-    this.seedBank = args.seedBank;
-    this.survey = args.survey;
+    this.pfx = inp.pfx;
+    this.term = inp.term ?? inp.pfx;
+    this.logger = inp.logger;
+    this.infraFact = inp.infraFact;
+    this.patioFact = inp.patioFact;
+    this.shedFact = inp.shedFact;
+    this.debug = inp.debug ?? false;
+    this.authenticity = inp.authenticity ?? 'real';
+    this.defaults = { region: 'ca-central-1' }[merge](inp.defaults ?? {});
+    
+    this.seedBank = inp.seedBank;
+    this.survey = inp.survey;
     this.serviceMap = this.progressiveServiceMap = {};
     
     // Settings passed to all `terraform` proc calls
@@ -242,9 +255,9 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
     
     const seenFlowers = new Set<Flower>();
     const ornaments = await this.survey(
-      this,
       seedBank,
-      <F extends Flower>(f: F) => (seenFlowers.add(f), f)
+      <F extends Flower>(f: F) => (seenFlowers.add(f), f),
+      this
     );
     
     for await (const topLevelFlower of seenFlowers)
@@ -263,10 +276,9 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
     const serviceMap = flowers.reduce((m, v) => Object.assign(m, v.getServiceMapTf()), {} as ServiceMap.Full);
     await Promise.all(flowers[map](f => f.cultivate(serviceMap)));
     
-    // Yield all unique petals of all flowers
-    
     return { ornaments, petals: (async function*() {
       
+      // Yield all unique petals of all flowers
       const seenPetals = new Set<PetalTerraform.Base>();
       for (const flower of seenFlowers) {
         for await (const petal of await flower.getPetals()) {
@@ -382,7 +394,11 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
             // Create s3 tf state bucket
             const s3 = await writePetalTfAndFiles(new PetalTerraform.Resource('awsS3Bucket', 'tfState', {
               bucket: s3Name,
-              forceDestroy: true
+              forceDestroy: true,
+              tags: {
+                lilacTerm: this.term,
+                lilacPrefix: this.pfx
+              }
             }));
             const s3Controls = await writePetalTfAndFiles(new PetalTerraform.Resource('awsS3BucketOwnershipControls', 'tfState', {
               bucket: s3.ref('bucket'),
@@ -402,7 +418,11 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
               billingMode:               phrasing('camel->snake', 'payPerRequest')[upper](),
               hashKey:                   'LockID',
               $attribute:                { name: 'LockID', type: 'S' },
-              deletionProtectionEnabled: false
+              deletionProtectionEnabled: false,
+              tags: {
+                lilacTerm: this.term,
+                lilacPrefix: this.pfx
+              }
             }));
             
             return null;
@@ -658,10 +678,11 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
     
     const { bootFact, mainFact, outputs, ornaments } = await this.genTerraform(soil);
     
-    // Init+apply both "boot" and "main", in optimistic fashion
+    // Init+apply both "boot" and "main" in optimistic fashion
     const isHealableTerraformApply = err => /run[^a-zA-Z0-9]+terraform init/.test(err.output as string ?? '');
     
-    const err = new Error('');
+    // Grow...
+    const err = Error('');
     await this.logger.scope('grow', { soil: getClsName(soil) }, async logger => {
       
       // Note that logical individual tf operations are handled by `this.logicalTfXxx` methods;
@@ -692,11 +713,13 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
       
     }).catch(cause => err[fire]({ msg: 'grow failed', cause }));
     
-    const output = await (async () => {
+    // Compute post-grow output...
+    const output = await this.logger.scope('output', {}, async () => {
       
       const snakeKeysToCamel = (obj: any) => {
-        if (!isCls(obj, Object)) return obj;
-        return obj[mapk]((v, k) => [ phrasing('snake->camel', k), snakeKeysToCamel(v) ]);
+        if (isCls(obj, Object)) return obj[mapk]((v, k) => [ phrasing('snake->camel', k), snakeKeysToCamel(v) ]);
+        if (isCls(obj, Array))  return obj[map](v => snakeKeysToCamel(v));
+        return obj;
       };
       
       // Use terraform cli to get output json
@@ -707,44 +730,79 @@ export class Garden<SB extends Obj<FlowerCtor>, Orn /* ornaments */> {
         cmd: 'terraform output -json',
         opts: { env: { TF_LOG: '' } } // Always prevent verbose output here - it breaks the json parse!!
       });
-      const tfOutputJson = snakeKeysToCamel(JSON.parse(tfOutputRaw)); // TODO: `snakeKeysToCamel` needed? I suspect just the 1st level of keys is snake-cased...
+      const tfOutputJson = snakeKeysToCamel(JSON.parse(tfOutputRaw)); // TODO: `snakeKeysToCamel`'s depth necessary here? I suspect just the 1st level of keys is snake-cased...
       
       const outputVals = await Promise[allArr](outputs.map(output => output.getOutput(tfOutputJson)));
       
       // Merge all outputs
       return outputVals.reduce((m, v) => {
-        if (isCls(v, Object)) m[merge](v);
-        else                  m._unknownOutputs.push(v);
+        if      (isCls(v, Object)) m[merge](v);
+        else if (v != null)        m._unknownOutputs.push(v);
         return m;
       }, { _unknownOutputs: [] });
       
-    })();
-    
+    });
     Object.assign(this.progressiveServiceMap, output[at]('serviceMap', {}));
     
-    const rake = () => this.logger.scope('rake', { soil: getClsName(soil) }, async logger => {
+    const rake = (logger = this.logger) => logger.scope('rake', { soil: getClsName(soil) }, async logger => {
       
-      logger = Logger.dummy; // Make "rake" log as if it were one opaque operation
+      // logger = Logger.dummy; // Make "rake" log as if it were one opaque operation
       
+      // Get an object of all cleanup functions (note Flowers should ensure cleanup function keys
+      // are globally unique)
+      const cleanupFns = output[cl.at]('cleanup', {}) as Obj<(logger: Logger) => Promise<void>>;
+      
+      // TODO: Should probably use a Throttler here
+      // Apply pre-terraform-destroy cleanup
+      await Promise.all(cleanupFns[cl.toArr](fn => fn(logger)));
+      
+      // Terraform destruction
       await this.logicalTfDestroy({ logger, fact: mainFact });
       await this.logicalTfDestroy({ logger, fact: bootFact });
       
     }).catch(cause => err[fire]({ msg: 'rake failed', cause }));
     
-    const result = { output, ornaments, rake };
+    // Enforce manual requirements...
+    const manualRequirements = output[cl.at]('manualRequirements', {}) as Obj<any>;
+    if (!manualRequirements[empty]()) throw Error('requirements unsatisfied')[mod]({ rake, manualRequirements });
     
-    const { manualRequirements = {} } = output;
-    if (!manualRequirements[empty]()) throw Error('requirements unsatisfied')[mod]({
-      manualRequirements,
-      ...result[slice]([ 'rake' ])
-    });
-    
-    return result;
+    return {
+      output,
+      ornaments,
+      rake
+    };
     
   }
   
 };
 
+// TODO: switch to `UndiciHttpHandler` - `import { UndiciHttpHandler } from '@aws-sdk/undici-http-handler'`
+
+/*
+new UndiciHttpHandler({
+  requestTimeout: 5000,       // Global total execution time cap
+  connectionTimeout: 2000,    // Global connection handshake time cap
+  
+  // Custom connection pool specifications go under 'dispatcher'
+  dispatcher: {
+    connections: 75,          // The direct equivalent to 'maxSockets'
+    
+    // Explicit modern timeouts (in milliseconds)
+    headersTimeout: 3000,     // Max time allowed to receive response headers
+    bodyTimeout: 5000,        // Max time allowed to download full response body
+  },
+});
+*/
+
+export const httpPools = ([ 1, 2, 3, 4 ] as const)[cl.toObj](v => [ `size${v}` as const, new NodeHttpHandler({
+  connectionTimeout:     Math.round(30 * 1000               ), // dns lookup + tcp socket + tls handshake
+  requestTimeout:        Math.round(30 * 1000 * Math.sqrt(v)), // limit time between request and response - note: avoid `socketTimeout`; it's deprecated in favour of `requestTimeout`
+  throwOnRequestTimeout: true,
+  httpAgent:             { maxSockets: 20 * 2 ** v },
+  httpsAgent:            { maxSockets: 20 * 2 ** v }
+})]);
+
+export { NodeHttpHandler } from '@smithy/node-http-handler';
 export * from './petal/terraform/terraform.ts';
 export * from './soil/soil.ts';
 export * from './util/aws.ts';

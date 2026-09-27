@@ -115,6 +115,11 @@ export namespace PetalTerraform {
     getHandle(): string { throw Error('not implemented'); }
     getProps(): { [key: string]: Json } { throw Error('not implemented'); }
     
+    // In general use `ref` as an exact property value; use `refStr` to embed into string values
+    // - Exact-property assignment should use .ref, i.e. `{ name: myResource.ref('name') }`
+    // - Embedding in strings should use .refStr, i.e. `{ desc: 'my resource named "' + myResource.refStr('name') + '"' }`
+    // - Referential string embeddings need to prefix the overall string with '|' to prevent it being string-quoted
+    
     refStr(props: string | string[] = []): string {
       
       if (!isCls(props, Array)) props = [ props ];
@@ -127,7 +132,7 @@ export namespace PetalTerraform {
     }
     ref(props: string | string[] = []): `| ${string}` {
       
-      // "plain ref" - uses "| " to avoid being  quoted within terraform
+      // "plain ref" - uses "| " to avoid being string-quoted within terraform
       
       return `| ${this.refStr(props)}`;
       
@@ -232,7 +237,8 @@ export namespace PetalTerraform {
       return { tf: '', files: { [this.fp]: this.content } };
     }
     refStr(props?: string | string[]) {
-      return this.fp; // `this.fp` should be quoted but not transformed to a tf handle
+      // `this.fp` should be quoted but not transformed to a tf handle
+      return this.fp;
     }
     
   };
@@ -240,20 +246,20 @@ export namespace PetalTerraform {
   export class Output<V> extends Base {
     
     protected handle: string;
-    protected tfValue: Json;
-    protected fn: (tfStateValue: Json) => Promise<V>;
-    constructor(handle: string, tfValue: Json, fn: (tfStateValue: Json) => Promise<V>) {
+    protected unresolvedTf: Json;
+    protected fn: (tfStateValue: Json) => (Promise<V> | V);
+    constructor(handle: string, unresolvedTf: Json, fn: (resolvedTf: any) => (Promise<V> | V)) {
       super();
       this.fn = fn;
       this.handle = handle;
-      this.tfValue = tfValue;
+      this.unresolvedTf = unresolvedTf;
     }
     
     async getResultHeader()             { return `output "${ph('camel->snake', this.handle)}"`; }
     getHandle()                         { return this.handle; }
-    getProps(): { [key: string]: Json } { return { value: this.tfValue, description: '<no desc>', sensitive: false }; }
+    getProps(): { [key: string]: Json } { return { value: this.unresolvedTf, description: '<no desc>', sensitive: false }; }
     
-    public getOutput(tfOutputJson): Promise<V> {
+    public getOutput(tfOutputJson): Promise<V> | V {
       const extracted = tfOutputJson[this.handle].value; // Note `tfOutputJson` has already had object keys converted to camelCase!
       return this.fn(extracted);
     }
